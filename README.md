@@ -13,7 +13,7 @@ These patches apply cleanly on top of Wine upstream commit [`53d513e6`](https://
 | 0003 | opencl: Implement `cl_khr_d3d10_sharing` extension for DXVK compatibility |
 | 0004 | opencl: Use substring matching for OpenCL/DXGI device name comparison |
 | 0005 | d2d1: Prevent runaway bezier splitting and recursion in geometry processing |
-| 0006 | comdlg32: Use XDG Desktop Portal for native file dialogs (Wine MR !10060) |
+| 0006 | comdlg32: Use XDG Desktop Portal for native file dialogs ([Wine MR !10060](https://gitlab.winehq.org/wine/wine/-/merge_requests/10060#941712bdad220aba7d6798d478d2fe9a0ed5c6d0)) |
 | 0007 | comdlg32: Fix portal dialog compatibility and responsiveness for Affinity |
 
 ## What these fix
