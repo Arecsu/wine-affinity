@@ -2,7 +2,16 @@
 
 Wine patches for running Affinity v3 (Designer, Photo, Publisher) on Linux.
 
-These patches are meant to be applied on top of [Wine upstream](https://gitlab.winehq.org/wine/wine) (tested against Wine 11.5).
+These patches apply cleanly on top of Wine upstream commit [`53d513e6`](https://gitlab.winehq.org/wine/wine/-/commit/53d513e626205d5506b7e959bf73b22fd1c17908) (Wine 11.5).
+
+## Applying
+
+```bash
+git clone https://gitlab.winehq.org/wine/wine.git
+cd wine
+git checkout 53d513e626205d5506b7e959bf73b22fd1c17908
+git am /path/to/wine-affinity/*.patch
+```
 
 ## Patches
 
@@ -19,14 +28,6 @@ These patches are meant to be applied on top of [Wine upstream](https://gitlab.w
 - **GPU OpenCL acceleration** works through DXVK's DXGI layer (patches 0003, 0004)
 - **Application freezes** on complex vector paths due to unbounded bezier splitting (patches 0002, 0005)
 - **DXCore adapter enumeration** with correct PCI ID reporting (patch 0003)
-
-## Applying
-
-```bash
-git clone https://gitlab.winehq.org/wine/wine.git
-cd wine
-git am /path/to/wine-affinity/*.patch
-```
 
 ## Building the patched DLLs
 
