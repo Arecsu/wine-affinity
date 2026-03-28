@@ -60,6 +60,10 @@ The built DLLs will be in `dlls/d2d1/`, `dlls/dxcore/`, `dlls/opencl/`, and `dll
 
 > Note: patch 0006 requires `libdbus-1-dev` at configure time for `comdlg32.so` to be built.
 
+## Usage
+
+These patches are used by [run-affinity](https://github.com/Arecsu/run-affinity) — a portable, ready-to-use installer for running Affinity on Linux.
+
 ## Credits
 
 - [ElementalWarrior (James McDonnell)](https://gitlab.winehq.org/ElementalWarrior/wine) — wintypes hack, dxcore patches, original opencl `cl_khr_d3d10_sharing` implementation
