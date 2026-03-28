@@ -2,6 +2,8 @@
 
 Wine patches for running Affinity on Linux.
 
+These patches are used by [run-affinity](https://github.com/Arecsu/run-affinity), a portable, ready-to-use installer for running Affinity on Linux.
+
 These patches apply cleanly on top of Wine upstream commit [`53d513e6`](https://gitlab.winehq.org/wine/wine/-/commit/53d513e626205d5506b7e959bf73b22fd1c17908) (Wine 11.5).
 
 ## Patches
@@ -59,10 +61,6 @@ make -j$(nproc) dlls/d2d1 dlls/dxcore dlls/opencl dlls/comdlg32
 The built DLLs will be in `dlls/d2d1/`, `dlls/dxcore/`, `dlls/opencl/`, and `dlls/comdlg32/`.
 
 > Note: patch 0006 requires `libdbus-1-dev` at configure time for `comdlg32.so` to be built.
-
-## Usage
-
-These patches are used by [run-affinity](https://github.com/Arecsu/run-affinity) — a portable, ready-to-use installer for running Affinity on Linux.
 
 ## Credits
 
