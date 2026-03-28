@@ -33,8 +33,8 @@ Pre-built DLLs are available in [Releases](https://github.com/Arecsu/wine-affini
 # Replace these with your actual Wine prefix path
 PREFIX=~/.wine
 
-cp d2d1.dll dxcore.dll opencl.dll "$PREFIX/drive_c/windows/system32/"
-cp opencl.so "$PREFIX/drive_c/windows/system32/"
+cp d2d1.dll dxcore.dll opencl.dll comdlg32.dll "$PREFIX/drive_c/windows/system32/"
+cp opencl.so comdlg32.so "$PREFIX/drive_c/windows/system32/"
 ```
 
 Then set the DLL overrides so Wine uses these instead of the builtins:
@@ -43,6 +43,7 @@ Then set the DLL overrides so Wine uses these instead of the builtins:
 WINEPREFIX="$PREFIX" wine reg add 'HKCU\Software\Wine\DllOverrides' /v d2d1 /d native /f
 WINEPREFIX="$PREFIX" wine reg add 'HKCU\Software\Wine\DllOverrides' /v dxcore /d native /f
 WINEPREFIX="$PREFIX" wine reg add 'HKCU\Software\Wine\DllOverrides' /v opencl /d native /f
+WINEPREFIX="$PREFIX" wine reg add 'HKCU\Software\Wine\DllOverrides' /v comdlg32 /d native /f
 ```
 
 ## Building from source
