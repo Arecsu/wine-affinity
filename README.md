@@ -1,6 +1,6 @@
 # wine-affinity
 
-Wine patches for running Affinity v3 (Designer, Photo, Publisher) on Linux.
+Wine patches for running Affinity on Linux.
 
 These patches apply cleanly on top of Wine upstream commit [`53d513e6`](https://gitlab.winehq.org/wine/wine/-/commit/53d513e626205d5506b7e959bf73b22fd1c17908) (Wine 11.5).
 
@@ -22,15 +22,14 @@ These patches apply cleanly on top of Wine upstream commit [`53d513e6`](https://
 
 ## Pre-built DLLs
 
-Pre-built DLLs are available in [Releases](https://github.com/Arecsu/wine-affinity/releases). To use them, copy both the PE (.dll) and Unix (.so) files into your Wine prefix:
+Pre-built DLLs are available in [Releases](https://github.com/Arecsu/wine-affinity/releases). To use them, copy the files into your Wine prefix:
 
 ```bash
 # Replace these with your actual Wine prefix path
 PREFIX=~/.wine
 
-cp d2d1.dll d2d1.so "$PREFIX/drive_c/windows/system32/"
-cp dxcore.dll dxcore.so "$PREFIX/drive_c/windows/system32/"
-cp opencl.dll opencl.so "$PREFIX/drive_c/windows/system32/"
+cp d2d1.dll dxcore.dll opencl.dll "$PREFIX/drive_c/windows/system32/"
+cp opencl.so "$PREFIX/drive_c/windows/system32/"
 ```
 
 Then set the DLL overrides so Wine uses these instead of the builtins:
