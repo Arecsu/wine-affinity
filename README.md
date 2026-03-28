@@ -41,5 +41,5 @@ The built DLLs can then be copied into any Wine prefix.
 
 ## Credits
 
-- [ElementalWarrior](https://github.com/AlfCraft07/ElementalWarrior-wine) / [__avg__](https://gitlab.winehq.org) — original opencl `cl_khr_d3d10_sharing` implementation and dxcore patches
-- [James McDonnell](https://github.com/AlfCraft07/ElementalWarrior-wine) — wintypes RoResolveNamespace hack
+- [ElementalWarrior (James McDonnell)](https://github.com/AlfCraft07/ElementalWarrior-wine) — wintypes hack, dxcore patches, original opencl `cl_khr_d3d10_sharing` implementation
+- [__avg__](https://gitlab.winehq.org) — opencl `cl_khr_d3d10_sharing` implementation
