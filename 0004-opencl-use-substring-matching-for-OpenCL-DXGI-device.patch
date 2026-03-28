@@ -1,0 +1,32 @@
+From 7e7ae8d48bbd0461a1ba5feaf098c02350c8e2b5 Mon Sep 17 00:00:00 2001
+From: Arecsu <alejandro9r@gmail.com>
+Date: Sat, 28 Mar 2026 03:49:21 -0300
+Subject: [PATCH 4/5] opencl: use substring matching for OpenCL/DXGI device
+ name comparison
+
+DXVK may report a different adapter name than the OpenCL driver (e.g.
+"NVIDIA GeForce RTX 3080 10GB" vs "NVIDIA GeForce RTX 3080"). Use
+wcsstr substring matching instead of wcscmp exact comparison so that
+devices are correctly matched regardless of naming differences.
+---
+ dlls/opencl/cl_khr_d3d10_sharing.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/opencl/cl_khr_d3d10_sharing.c b/dlls/opencl/cl_khr_d3d10_sharing.c
+index 737afce..52f3e9c 100644
+--- a/dlls/opencl/cl_khr_d3d10_sharing.c
++++ b/dlls/opencl/cl_khr_d3d10_sharing.c
+@@ -65,7 +65,9 @@ cl_int compare_dxgi_cl_device(IUnknown* d3d_adapter, cl_device_id cl_device, cl_
+     free(params.param_value);
+ 
+     TRACE("cl_name %s, from %lld, d3d %s.\n", wine_dbgstr_w(cl_name), params.param_value_size, wine_dbgstr_w(info.Description));
+-    *result = (wcscmp(cl_name, info.Description) == 0);
++    /* Use substring match: DXVK may append VRAM size (e.g. "RTX 3080 10GB") while
++       OpenCL reports just "RTX 3080". Match if either name contains the other. */
++    *result = (wcsstr(info.Description, cl_name) != NULL || wcsstr(cl_name, info.Description) != NULL);
+ 
+     free(cl_name);
+ 
+-- 
+2.53.0
+

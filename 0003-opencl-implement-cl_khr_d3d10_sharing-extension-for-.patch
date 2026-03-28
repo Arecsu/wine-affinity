@@ -1,0 +1,763 @@
+From 6f29afd7097867c4a5326f4c4cdcb22e3b53cd8b Mon Sep 17 00:00:00 2001
+From: Arecsu <alejandro9r@gmail.com>
+Date: Sat, 28 Mar 2026 03:49:09 -0300
+Subject: [PATCH 3/5] opencl: implement cl_khr_d3d10_sharing extension for DXVK
+ compatibility
+
+Implement the cl_khr_d3d10_sharing OpenCL extension using standard DXGI
+interfaces (IDXGIAdapter via dxgi1_6.h) instead of Wine-internal
+IWineDXGIAdapter, enabling compatibility with DXVK's DXGI implementation.
+
+This allows Affinity and other applications to discover OpenCL devices
+through D3D10/DXGI adapter matching.
+
+Also implements full DXCore adapter enumeration via DXGI with correct
+PCI ID reporting.
+
+Based on ElementalWarrior/__avg__ OpenCL patches.
+
+Co-authored-by: James McDonnell <topgamer7@gmail.com>
+---
+ dlls/dxcore/Makefile.in            |   2 +-
+ dlls/dxcore/dxcore.c               | 137 +++++++++++++++++++++++-
+ dlls/opencl/Makefile.in            |   3 +-
+ dlls/opencl/cl_khr_d3d10_sharing.c | 164 +++++++++++++++++++++++++++++
+ dlls/opencl/extensions.h           |  10 ++
+ dlls/opencl/make_opencl            |  17 ++-
+ dlls/opencl/opencl_types.h         |  23 ++++
+ dlls/opencl/pe_thunks.c            |  11 +-
+ dlls/opencl/pe_wrappers.c          |  30 +++++-
+ 9 files changed, 386 insertions(+), 11 deletions(-)
+ create mode 100644 dlls/opencl/cl_khr_d3d10_sharing.c
+ create mode 100644 dlls/opencl/extensions.h
+
+diff --git a/dlls/dxcore/Makefile.in b/dlls/dxcore/Makefile.in
+index 1472165..3a9990a 100644
+--- a/dlls/dxcore/Makefile.in
++++ b/dlls/dxcore/Makefile.in
+@@ -1,5 +1,5 @@
+ MODULE  = dxcore.dll
+-IMPORTS = wined3d
++IMPORTS = wined3d dxgi uuid
+ 
+ EXTRADLLFLAGS = -Wb,--prefer-native
+ 
+diff --git a/dlls/dxcore/dxcore.c b/dlls/dxcore/dxcore.c
+index a63a8f3..c3e2876 100644
+--- a/dlls/dxcore/dxcore.c
++++ b/dlls/dxcore/dxcore.c
+@@ -21,10 +21,13 @@
+ #define COBJMACROS
+ #include "initguid.h"
+ #include "dxcore.h"
++#include "dxgi.h"
++#include "dxgi1_2.h"
+ #include "wine/wined3d.h"
+ 
+ #include "wine/debug.h"
+ 
++
+ WINE_DEFAULT_DEBUG_CHANNEL(dxcore);
+ 
+ struct dxcore_adapter
+@@ -34,6 +37,17 @@ struct dxcore_adapter
+ 
+     struct wined3d_adapter_identifier identifier;
+     char driver_description[128];
++
++    /* DXGI-sourced PCI info (more reliable than wined3d without display) */
++    UINT dxgi_vendor_id;
++    UINT dxgi_device_id;
++    UINT dxgi_sub_sys_id;
++    UINT dxgi_revision;
++    BOOL dxgi_valid;
++
++    /* Lazily-initialized DXGI adapter (matched by LUID) */
++    IDXGIAdapter1 *dxgi_adapter;
++    BOOL dxgi_adapter_tried;
+ };
+ 
+ static inline struct dxcore_adapter *impl_from_IDXCoreAdapter(IDXCoreAdapter *iface)
+@@ -41,6 +55,49 @@ static inline struct dxcore_adapter *impl_from_IDXCoreAdapter(IDXCoreAdapter *if
+     return CONTAINING_RECORD(iface, struct dxcore_adapter, IDXCoreAdapter_iface);
+ }
+ 
++static void dxcore_adapter_ensure_dxgi(struct dxcore_adapter *adapter)
++{
++    IDXGIFactory1 *factory;
++    IDXGIAdapter1 *dxgi_a;
++    UINT i = 0;
++
++    if (adapter->dxgi_adapter_tried)
++        return;
++    adapter->dxgi_adapter_tried = TRUE;
++
++    if (FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&factory)))
++        return;
++
++    FIXME("dxcore_adapter_ensure_dxgi: adapter identifier vendor_id=0x%04x device_id=0x%04x luid=%u:%d\n",
++          adapter->identifier.vendor_id, adapter->identifier.device_id,
++          adapter->identifier.adapter_luid.LowPart, adapter->identifier.adapter_luid.HighPart);
++
++    while (IDXGIFactory1_EnumAdapters1(factory, i++, &dxgi_a) == S_OK)
++    {
++        DXGI_ADAPTER_DESC1 desc;
++        IDXGIAdapter1_GetDesc1(dxgi_a, &desc);
++        FIXME("dxcore_adapter_ensure_dxgi: DXGI adapter %u: VendorId=0x%04x DeviceId=0x%04x LUID=%u:%d\n",
++              i - 1, desc.VendorId, desc.DeviceId, desc.AdapterLuid.LowPart, desc.AdapterLuid.HighPart);
++        if (desc.AdapterLuid.LowPart == adapter->identifier.adapter_luid.LowPart
++                && desc.AdapterLuid.HighPart == adapter->identifier.adapter_luid.HighPart)
++        {
++            adapter->dxgi_adapter = dxgi_a;
++            /* Also fill in accurate PCI IDs */
++            adapter->dxgi_vendor_id  = desc.VendorId;
++            adapter->dxgi_device_id  = desc.DeviceId;
++            adapter->dxgi_sub_sys_id = desc.SubSysId;
++            adapter->dxgi_revision   = desc.Revision;
++            adapter->dxgi_valid      = TRUE;
++            FIXME("dxcore_adapter_ensure_dxgi: MATCHED! Using DXGI vendor=0x%04x device=0x%04x\n",
++                  desc.VendorId, desc.DeviceId);
++            break;
++        }
++        IDXGIAdapter1_Release(dxgi_a);
++    }
++
++    IDXGIFactory1_Release(factory);
++}
++
+ static HRESULT STDMETHODCALLTYPE dxcore_adapter_QueryInterface(IDXCoreAdapter *iface, REFIID riid, void **out)
+ {
+     struct dxcore_adapter *adapter = impl_from_IDXCoreAdapter(iface);
+@@ -55,6 +112,16 @@ static HRESULT STDMETHODCALLTYPE dxcore_adapter_QueryInterface(IDXCoreAdapter *i
+         return S_OK;
+     }
+ 
++    /* Affinity queries for IDXGIAdapter to check D3D12 feature level support */
++    if (IsEqualGUID(riid, &IID_IDXGIAdapter)
++            || IsEqualGUID(riid, &IID_IDXGIAdapter1)
++            || IsEqualGUID(riid, &IID_IDXGIObject))
++    {
++        dxcore_adapter_ensure_dxgi(adapter);
++        if (adapter->dxgi_adapter)
++            return IDXGIAdapter1_QueryInterface(adapter->dxgi_adapter, riid, out);
++    }
++
+     FIXME("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(riid));
+     *out = NULL;
+     return E_NOINTERFACE;
+@@ -78,27 +145,49 @@ static ULONG STDMETHODCALLTYPE dxcore_adapter_Release(IDXCoreAdapter *iface)
+     TRACE("%p decreasing refcount to %lu.\n", iface, refcount);
+ 
+     if (!refcount)
++    {
++        if (adapter->dxgi_adapter)
++            IDXGIAdapter1_Release(adapter->dxgi_adapter);
+         free(adapter);
++    }
+ 
+     return refcount;
+ }
+ 
+ static BOOL STDMETHODCALLTYPE dxcore_adapter_IsValid(IDXCoreAdapter *iface)
+ {
+-    FIXME("iface %p stub!\n", iface);
+-    return FALSE;
++    TRACE("iface %p\n", iface);
++    return TRUE;
+ }
+ 
+ static BOOL STDMETHODCALLTYPE dxcore_adapter_IsAttributeSupported(IDXCoreAdapter *iface, REFGUID attribute)
+ {
+-    FIXME("iface %p, attribute %s stub!\n", iface, debugstr_guid(attribute));
++    TRACE("iface %p, attribute %s\n", iface, debugstr_guid(attribute));
++
++    if (IsEqualGUID(attribute, &DXCORE_ADAPTER_ATTRIBUTE_D3D12_GRAPHICS)
++            || IsEqualGUID(attribute, &DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE)
++            || IsEqualGUID(attribute, &DXCORE_ADAPTER_ATTRIBUTE_D3D11_GRAPHICS))
++        return TRUE;
++
++    FIXME("iface %p, attribute %s unknown\n", iface, debugstr_guid(attribute));
+     return FALSE;
+ }
+ 
+ static BOOL STDMETHODCALLTYPE dxcore_adapter_IsPropertySupported(IDXCoreAdapter *iface, DXCoreAdapterProperty property)
+ {
+-    FIXME("iface %p, property %u stub!\n", iface, property);
+-    return FALSE;
++    TRACE("iface %p, property %u\n", iface, property);
++
++    switch (property)
++    {
++        case InstanceLuid:
++        case DriverVersion:
++        case HardwareID:
++        case IsHardware:
++        case DriverDescription:
++            return TRUE;
++        default:
++            return FALSE;
++    }
+ }
+ 
+ static HRESULT dxcore_adapter_get_property_size(struct dxcore_adapter *adapter,
+@@ -167,10 +256,14 @@ static HRESULT STDMETHODCALLTYPE dxcore_adapter_GetProperty(IDXCoreAdapter *ifac
+         {
+             struct DXCoreHardwareID *hardware_id = buffer;
+ 
++            /* Always prefer wined3d identifier — DXVK's dxgi can report
++               wrong PCI IDs (e.g. AMD IDs for NVIDIA cards). */
+             hardware_id->vendorID = adapter->identifier.vendor_id;
+             hardware_id->deviceID = adapter->identifier.device_id;
+             hardware_id->subSysID = adapter->identifier.subsystem_id;
+             hardware_id->revision = adapter->identifier.revision;
++            FIXME("HardwareID: vendor=0x%04x device=0x%04x\n",
++                  hardware_id->vendorID, hardware_id->deviceID);
+             break;
+         }
+ 
+@@ -468,6 +561,37 @@ static HRESULT dxcore_adapter_create(const struct wined3d_adapter *wined3d_adapt
+     return S_OK;
+ }
+ 
++static void get_adapters_dxgi_info(struct dxcore_adapter_list *list)
++{
++    IDXGIFactory1 *factory = NULL;
++    UINT dxgi_idx = 0;
++
++    if (FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&factory)))
++        return;
++
++    for (UINT i = 0; i < list->adapter_count; i++)
++    {
++        IDXGIAdapter *adapter = NULL;
++        DXGI_ADAPTER_DESC desc;
++
++        if (SUCCEEDED(IDXGIFactory1_EnumAdapters(factory, dxgi_idx, &adapter)))
++        {
++            if (SUCCEEDED(IDXGIAdapter_GetDesc(adapter, &desc)))
++            {
++                list->adapters[i]->dxgi_vendor_id  = desc.VendorId;
++                list->adapters[i]->dxgi_device_id  = desc.DeviceId;
++                list->adapters[i]->dxgi_sub_sys_id = desc.SubSysId;
++                list->adapters[i]->dxgi_revision   = desc.Revision;
++                list->adapters[i]->dxgi_valid       = TRUE;
++            }
++            IDXGIAdapter_Release(adapter);
++            dxgi_idx++;
++        }
++    }
++
++    IDXGIFactory1_Release(factory);
++}
++
+ static HRESULT get_adapters(struct dxcore_adapter_list *list)
+ {
+     struct wined3d *wined3d = wined3d_create(0);
+@@ -491,6 +615,9 @@ static HRESULT get_adapters(struct dxcore_adapter_list *list)
+             goto done;
+     }
+ 
++    /* Fill in accurate PCI IDs via DXGI (wined3d may return zeros without a display) */
++    get_adapters_dxgi_info(list);
++
+ done:
+     wined3d_decref(wined3d);
+     return hr;
+diff --git a/dlls/opencl/Makefile.in b/dlls/opencl/Makefile.in
+index 69df0a3..aac44bd 100644
+--- a/dlls/opencl/Makefile.in
++++ b/dlls/opencl/Makefile.in
+@@ -6,4 +6,5 @@ SOURCES = \
+ 	pe_thunks.c \
+ 	pe_wrappers.c \
+ 	unix_thunks.c \
+-	unix_wrappers.c
++	unix_wrappers.c \
++	cl_khr_d3d10_sharing.c
+diff --git a/dlls/opencl/cl_khr_d3d10_sharing.c b/dlls/opencl/cl_khr_d3d10_sharing.c
+new file mode 100644
+index 0000000..737afce
+--- /dev/null
++++ b/dlls/opencl/cl_khr_d3d10_sharing.c
+@@ -0,0 +1,164 @@
++#include "opencl_private.h"
++#include "opencl_types.h"
++#include "unixlib.h"
++#include "extensions.h"
++
++#define COBJMACROS
++#include "objbase.h"
++#include "initguid.h"
++#include "dxgi1_6.h"
++
++
++WINE_DEFAULT_DEBUG_CHANNEL(opencl);
++
++
++cl_int compare_dxgi_cl_device(IUnknown* d3d_adapter, cl_device_id cl_device, cl_bool *result) {
++    cl_int err;
++    IDXGIAdapter *this;
++    DXGI_ADAPTER_DESC info;
++    WCHAR *cl_name;
++    struct clGetDeviceInfo_params params;
++
++    // note: it is possible to compare the UUID if the device supports cl_khr_device_uuid
++    // and I would like to do that, but I also want built in DXVK support :)
++    // also SLI isn't really supported anymore so probs not relevant
++    if (FAILED(IUnknown_QueryInterface(d3d_adapter, &IID_IDXGIAdapter, (void **)&this))) {
++        ERR("Not a IDXGIAdapter %p.\n", d3d_adapter);
++        return CL_DEVICE_NOT_FOUND;
++    }
++
++    if (FAILED(IDXGIAdapter_GetDesc(this, &info))) {
++        ERR("Could not get adapter info %p.\n", this);
++        IUnknown_Release(this);
++        return CL_DEVICE_NOT_FOUND;
++    }
++    IUnknown_Release(this);
++
++
++    params.device = cl_device;
++    params.param_name = CL_DEVICE_NAME;
++    params.param_value = NULL;
++    params.param_value_size = 0;
++    params.param_value_size_ret = &params.param_value_size;
++    if ((err = OPENCL_CALL( clGetDeviceInfo, &params ))) {
++        ERR("Error getting device name of %p; %d.\n", cl_device, err);
++        return err;
++    }
++
++    if (!(params.param_value = calloc(params.param_value_size+1, 1)))
++        err = CL_OUT_OF_HOST_MEMORY;
++    if (!(cl_name = calloc(params.param_value_size+1, sizeof(WCHAR))))
++        err = CL_OUT_OF_HOST_MEMORY;
++
++    if (err) {
++        if (params.param_value) free(params.param_value);
++        if (cl_name) free(params.param_value);
++        return err;
++    }
++
++    if ((err = OPENCL_CALL( clGetDeviceInfo, &params ))) {
++        ERR("Error getting device name of %p; %d.\n", cl_device, err);
++        return err;
++    }
++
++    mbstowcs(cl_name, params.param_value, params.param_value_size);
++    free(params.param_value);
++
++    TRACE("cl_name %s, from %lld, d3d %s.\n", wine_dbgstr_w(cl_name), params.param_value_size, wine_dbgstr_w(info.Description));
++    *result = (wcscmp(cl_name, info.Description) == 0);
++
++    free(cl_name);
++
++    return CL_SUCCESS;
++}
++
++
++cl_int WINAPI dxgi_adapter_to_opencl(
++    IUnknown *adapter,
++    cl_platform_id platform,
++    cl_uint d3d_device_set,
++    cl_uint num_entries,
++    cl_device_id *devices,
++    cl_uint *num_devices
++) {
++    struct clGetDeviceIDs_params ids_params;
++
++    int i;
++    cl_int err;
++    cl_uint p_num_devices;
++    cl_bool same_device;
++
++
++    ids_params.platform = platform;
++    ids_params.device_type = CL_DEVICE_TYPE_ALL;
++    ids_params.num_devices = &ids_params.num_entries;
++    ids_params.num_entries = 0;
++    ids_params.devices = NULL;
++
++    if ((err = OPENCL_CALL( clGetDeviceIDs , &ids_params )))
++        return err;
++
++    if (!(ids_params.devices = calloc(ids_params.num_entries, sizeof(cl_device_id))))
++        return CL_OUT_OF_HOST_MEMORY;
++
++    if ((err = OPENCL_CALL( clGetDeviceIDs , &ids_params ))) {
++        free(ids_params.devices);
++        return err;
++    }
++
++    p_num_devices = 0;
++
++    // compare devices
++    for (i=0; i<ids_params.num_entries; i++) {
++        err = compare_dxgi_cl_device(adapter, ids_params.devices[i], &same_device);
++        if (err)
++            break;
++
++        if (!same_device)
++            continue;
++
++        if (devices) {
++            if (num_entries > p_num_devices) {
++                devices[p_num_devices] = ids_params.devices[i];
++            } else {
++                err = CL_INVALID_VALUE;
++                break;
++            }
++        }
++        p_num_devices++;
++    }
++
++    free(ids_params.devices);
++
++    if ((!err) && num_devices)
++        *num_devices = p_num_devices;
++
++    return err;
++}
++
++
++cl_int WINAPI clGetDeviceIDsFromD3D10KHR(
++    cl_platform_id platform,
++    cl_uint d3d_device_source,
++    void* d3d_object,
++    cl_uint d3d_device_set,
++    cl_uint num_entries,
++    cl_device_id* devices,
++    cl_uint* num_devices
++) {
++    TRACE("platform %p, device_source %d, d3d_object %p, d3d_device_set %u, num_entries %u, devices %p, num_devices %p semi-stub!\n",
++        platform, d3d_device_source, d3d_object, d3d_device_set, num_entries, devices, num_devices);
++
++    return dxgi_adapter_to_opencl((IUnknown*)d3d_object, platform,
++            d3d_device_set, num_entries, devices, num_devices);
++}
++
++
++void* cl_khr_d3d10_sharing_get_function(const char* name) {
++    // NOTE: other functions in this extension seem non-trivial to implement,
++    // involve lots of deep knowledge of D3D and OpenCL (which I do not have),
++    // and may involve a heavy rewrite of this whole OpenCL wrapper.
++    if (!strcmp(name, "clGetDeviceIDsFromD3D10KHR"))
++        return clGetDeviceIDsFromD3D10KHR;
++    return NULL;
++}
+diff --git a/dlls/opencl/extensions.h b/dlls/opencl/extensions.h
+new file mode 100644
+index 0000000..4c7e995
+--- /dev/null
++++ b/dlls/opencl/extensions.h
+@@ -0,0 +1,10 @@
++struct extension_info {
++    const char *name;
++    void* (*get_function)(const char*);
++};
++
++void* cl_khr_d3d10_sharing_get_function(const char*);
++
++static struct extension_info known_extensions[] = {
++    {"cl_khr_d3d10_sharing", cl_khr_d3d10_sharing_get_function}
++};
+diff --git a/dlls/opencl/make_opencl b/dlls/opencl/make_opencl
+index 1bc1b0f..43443b1 100755
+--- a/dlls/opencl/make_opencl
++++ b/dlls/opencl/make_opencl
+@@ -61,7 +61,6 @@ my %unsupported_extensions =
+         # Needs wined3d integration.
+         "cl_intel_d3d11_nv12_media_sharing" => 1,
+         "cl_intel_dx9_media_sharing" => 1,
+-        "cl_khr_d3d10_sharing" => 1,
+         "cl_khr_d3d11_sharing" => 1,
+         "cl_khr_dx9_media_sharing" => 1,
+         "cl_nv_d3d9_sharing" => 1,
+@@ -77,6 +76,11 @@ my %unsupported_extensions =
+         "cl_arm_shared_virtual_memory" => 1,
+     );
+ 
++my %provided_extensions =
++    (
++        "cl_khr_d3d10_sharing" => 1,
++    );
++
+ sub generate_pe_thunk($$)
+ {
+     my ($name, $func_ref) = @_;
+@@ -513,6 +517,8 @@ sub parse_file($)
+         # support KHR_gl_sharing yet, but we need to export the functions anyway
+         # (some applications expect them to be present).
+         parse_feature($ext, 0) if lc($ext->{name}) eq "cl_khr_gl_sharing";
++        parse_feature($ext, 0) if lc($ext->{name}) eq "cl_khr_device_uuid";
++        parse_feature($ext, 0) if lc($ext->{name}) eq "cl_khr_d3d10_sharing";
+     }
+ }
+ 
+@@ -536,7 +542,8 @@ print PE "/* Automatically generated from OpenCL registry files; DO NOT EDIT! */
+ 
+ print PE "#include \"opencl_private.h\"\n";
+ print PE "#include \"opencl_types.h\"\n";
+-print PE "#include \"unixlib.h\"\n\n";
++print PE "#include \"unixlib.h\"\n";
++print PE "#include \"extensions.h\"\n\n";
+ 
+ print PE "WINE_DEFAULT_DEBUG_CHANNEL(opencl);\n" if $gen_traces;
+ 
+@@ -565,6 +572,12 @@ foreach (sort keys %unsupported_extensions)
+ print PE <<EOF
+     };
+ 
++    for (i = 0; i< ARRAY_SIZE(known_extensions); i++)
++    {
++        if (known_extensions[i].get_function && !strncasecmp( name, known_extensions[i].name, len ))
++            return TRUE;
++    }
++
+     for (i = 0; i < ARRAY_SIZE(unsupported); ++i)
+     {
+         if (!strncasecmp( name, unsupported[i], len ))
+diff --git a/dlls/opencl/opencl_types.h b/dlls/opencl/opencl_types.h
+index b116bb5..b752f6f 100644
+--- a/dlls/opencl/opencl_types.h
++++ b/dlls/opencl/opencl_types.h
+@@ -79,6 +79,8 @@ typedef struct _cl_image_desc
+  cl_mem mem_object;
+  };
+ } cl_image_desc;
++typedef cl_uint          cl_d3d10_device_source_khr;
++typedef cl_uint          cl_d3d10_device_set_khr;
+ typedef cl_uint          cl_gl_context_info;
+ typedef cl_uint          cl_gl_object_type;
+ typedef cl_uint          cl_gl_texture_info;
+@@ -90,6 +92,7 @@ typedef cl_uint          cl_gl_platform_info;
+ #define CL_ADDRESS_MIRRORED_REPEAT 0x1134
+ #define CL_ADDRESS_NONE 0x1130
+ #define CL_ADDRESS_REPEAT 0x1133
++#define CL_ALL_DEVICES_FOR_D3D10_KHR 0x4013
+ #define CL_ARGB 0x10B7
+ #define CL_BGRA 0x10B6
+ #define CL_BLOCKING CL_TRUE
+@@ -103,6 +106,7 @@ typedef cl_uint          cl_gl_platform_info;
+ #define CL_CHAR_BIT 8
+ #define CL_CHAR_MAX CL_SCHAR_MAX
+ #define CL_CHAR_MIN CL_SCHAR_MIN
++#define CL_COMMAND_ACQUIRE_D3D10_OBJECTS_KHR 0x4017
+ #define CL_COMMAND_ACQUIRE_GL_OBJECTS 0x11FF
+ #define CL_COMMAND_BARRIER 0x1205
+ #define CL_COMMAND_COPY_BUFFER 0x11F5
+@@ -121,6 +125,7 @@ typedef cl_uint          cl_gl_platform_info;
+ #define CL_COMMAND_READ_BUFFER 0x11F3
+ #define CL_COMMAND_READ_BUFFER_RECT 0x1201
+ #define CL_COMMAND_READ_IMAGE 0x11F6
++#define CL_COMMAND_RELEASE_D3D10_OBJECTS_KHR 0x4018
+ #define CL_COMMAND_RELEASE_GL_OBJECTS 0x1200
+ #define CL_COMMAND_TASK 0x11F1
+ #define CL_COMMAND_UNMAP_MEM_OBJECT 0x11FD
+@@ -131,6 +136,8 @@ typedef cl_uint          cl_gl_platform_info;
+ #define CL_COMPILER_NOT_AVAILABLE -3
+ #define CL_COMPILE_PROGRAM_FAILURE -15
+ #define CL_COMPLETE 0x0
++#define CL_CONTEXT_D3D10_DEVICE_KHR 0x4014
++#define CL_CONTEXT_D3D10_PREFER_SHARED_RESOURCES_KHR 0x402C
+ #define CL_CONTEXT_DEVICES 0x1081
+ #define CL_CONTEXT_INTEROP_USER_SYNC 0x1085
+ #define CL_CONTEXT_NUM_DEVICES 0x1083
+@@ -138,6 +145,10 @@ typedef cl_uint          cl_gl_platform_info;
+ #define CL_CONTEXT_PROPERTIES 0x1082
+ #define CL_CONTEXT_REFERENCE_COUNT 0x1080
+ #define CL_CURRENT_DEVICE_FOR_GL_CONTEXT_KHR 0x2006
++#define CL_D3D10_DEVICE_KHR 0x4010
++#define CL_D3D10_DXGI_ADAPTER_KHR 0x4011
++#define CL_D3D10_RESOURCE_ALREADY_ACQUIRED_KHR -1004
++#define CL_D3D10_RESOURCE_NOT_ACQUIRED_KHR -1005
+ #define CL_DBL_DIG 15
+ #define CL_DBL_EPSILON 2.220446049250313080847e-16
+ #define CL_DBL_MANT_DIG 53
+@@ -180,6 +191,8 @@ typedef cl_uint          cl_gl_platform_info;
+ #define CL_DEVICE_LINKER_AVAILABLE 0x103E
+ #define CL_DEVICE_LOCAL_MEM_SIZE 0x1023
+ #define CL_DEVICE_LOCAL_MEM_TYPE 0x1022
++#define CL_DEVICE_LUID_KHR 0x106D
++#define CL_DEVICE_LUID_VALID_KHR 0x106C
+ #define CL_DEVICE_MAX_CLOCK_FREQUENCY 0x100C
+ #define CL_DEVICE_MAX_COMPUTE_UNITS 0x1002
+ #define CL_DEVICE_MAX_CONSTANT_ARGS 0x1021
+@@ -202,6 +215,7 @@ typedef cl_uint          cl_gl_platform_info;
+ #define CL_DEVICE_NATIVE_VECTOR_WIDTH_INT 0x1038
+ #define CL_DEVICE_NATIVE_VECTOR_WIDTH_LONG 0x1039
+ #define CL_DEVICE_NATIVE_VECTOR_WIDTH_SHORT 0x1037
++#define CL_DEVICE_NODE_MASK_KHR 0x106E
+ #define CL_DEVICE_NOT_AVAILABLE -2
+ #define CL_DEVICE_NOT_FOUND -1
+ #define CL_DEVICE_OPENCL_C_VERSION 0x103D
+@@ -237,9 +251,11 @@ typedef cl_uint          cl_gl_platform_info;
+ #define CL_DEVICE_TYPE_CUSTOM (1 << 4)
+ #define CL_DEVICE_TYPE_DEFAULT (1 << 0)
+ #define CL_DEVICE_TYPE_GPU (1 << 2)
++#define CL_DEVICE_UUID_KHR 0x106A
+ #define CL_DEVICE_VENDOR 0x102C
+ #define CL_DEVICE_VENDOR_ID 0x1001
+ #define CL_DEVICE_VERSION 0x102F
++#define CL_DRIVER_UUID_KHR 0x106B
+ #define CL_DRIVER_VERSION 0x102D
+ #define CL_EGL_DISPLAY_KHR 0x2009
+ #define CL_EVENT_COMMAND_EXECUTION_STATUS 0x11D3
+@@ -291,6 +307,7 @@ typedef cl_uint          cl_gl_platform_info;
+ #define CL_HUGE_VALF ((cl_float) 1e50)
+ #define CL_IMAGE_ARRAY_SIZE 0x1117
+ #define CL_IMAGE_BUFFER 0x1118
++#define CL_IMAGE_D3D10_SUBRESOURCE_KHR 0x4016
+ #define CL_IMAGE_DEPTH 0x1116
+ #define CL_IMAGE_ELEMENT_SIZE 0x1111
+ #define CL_IMAGE_FORMAT 0x1110
+@@ -315,6 +332,8 @@ typedef cl_uint          cl_gl_platform_info;
+ #define CL_INVALID_COMMAND_QUEUE -36
+ #define CL_INVALID_COMPILER_OPTIONS -66
+ #define CL_INVALID_CONTEXT -34
++#define CL_INVALID_D3D10_DEVICE_KHR -1002
++#define CL_INVALID_D3D10_RESOURCE_KHR -1003
+ #define CL_INVALID_DEVICE -33
+ #define CL_INVALID_DEVICE_PARTITION_COUNT -68
+ #define CL_INVALID_DEVICE_TYPE -31
+@@ -381,6 +400,7 @@ typedef cl_uint          cl_gl_platform_info;
+ #define CL_LOCAL 0x1
+ #define CL_LONG_MAX ((cl_long) 0x7FFFFFFFFFFFFFFFLL)
+ #define CL_LONG_MIN ((cl_long) -0x7FFFFFFFFFFFFFFFLL - 1LL)
++#define CL_LUID_SIZE_KHR 8
+ #define CL_LUMINANCE 0x10B9
+ #define CL_MAP_FAILURE -12
+ #define CL_MAP_READ (1 << 0)
+@@ -392,6 +412,7 @@ typedef cl_uint          cl_gl_platform_info;
+ #define CL_MEM_CONTEXT 0x1106
+ #define CL_MEM_COPY_HOST_PTR (1 << 5)
+ #define CL_MEM_COPY_OVERLAP -8
++#define CL_MEM_D3D10_RESOURCE_KHR 0x4015
+ #define CL_MEM_FLAGS 0x1101
+ #define CL_MEM_HOST_NO_ACCESS (1 << 9)
+ #define CL_MEM_HOST_PTR 0x1103
+@@ -427,6 +448,7 @@ typedef cl_uint          cl_gl_platform_info;
+ #define CL_PLATFORM_PROFILE 0x0900
+ #define CL_PLATFORM_VENDOR 0x0903
+ #define CL_PLATFORM_VERSION 0x0901
++#define CL_PREFERRED_DEVICES_FOR_D3D10_KHR 0x4012
+ #define CL_PROFILING_COMMAND_END 0x1283
+ #define CL_PROFILING_COMMAND_QUEUED 0x1280
+ #define CL_PROFILING_COMMAND_START 0x1282
+@@ -496,4 +518,5 @@ typedef cl_uint          cl_gl_platform_info;
+ #define CL_UNSIGNED_INT32 0x10DC
+ #define CL_UNSIGNED_INT8 0x10DA
+ #define CL_USHRT_MAX 65535
++#define CL_UUID_SIZE_KHR 16
+ #define CL_WGL_HDC_KHR 0x200B
+diff --git a/dlls/opencl/pe_thunks.c b/dlls/opencl/pe_thunks.c
+index f34826e..30ee098 100644
+--- a/dlls/opencl/pe_thunks.c
++++ b/dlls/opencl/pe_thunks.c
+@@ -3,6 +3,7 @@
+ #include "opencl_private.h"
+ #include "opencl_types.h"
+ #include "unixlib.h"
++#include "extensions.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(opencl);
+ 
+@@ -581,9 +582,11 @@ cl_int WINAPI clRetainSampler( cl_sampler sampler )
+ 
+ cl_int WINAPI clSetEventCallback( cl_event event, cl_int command_exec_callback_type, void (WINAPI* pfn_notify)(cl_event event, cl_int event_command_status, void *user_data), void* user_data )
+ {
++    cl_int ret;
+     struct clSetEventCallback_params params = { event, command_exec_callback_type, pfn_notify, user_data };
+     TRACE( "(%p, %d, %p, %p)\n", event, command_exec_callback_type, pfn_notify, user_data );
+-    return OPENCL_CALL( clSetEventCallback, &params );
++    ret = OPENCL_CALL( clSetEventCallback, &params );
++    return ret;
+ }
+ 
+ cl_int WINAPI clSetKernelArg( cl_kernel kernel, cl_uint arg_index, size_t arg_size, const void* arg_value )
+@@ -667,6 +670,12 @@ BOOL extension_is_supported( const char *name, size_t len )
+         "cl_qcom_ext_host_ptr",
+     };
+ 
++    for (i = 0; i< ARRAY_SIZE(known_extensions); i++)
++    {
++        if (known_extensions[i].get_function && !strncasecmp( name, known_extensions[i].name, len ))
++            return TRUE;
++    }
++
+     for (i = 0; i < ARRAY_SIZE(unsupported); ++i)
+     {
+         if (!strncasecmp( name, unsupported[i], len ))
+diff --git a/dlls/opencl/pe_wrappers.c b/dlls/opencl/pe_wrappers.c
+index 3b68460..0c02832 100644
+--- a/dlls/opencl/pe_wrappers.c
++++ b/dlls/opencl/pe_wrappers.c
+@@ -22,6 +22,7 @@
+ #include "opencl_types.h"
+ #include "unixlib.h"
+ #include "wine/wgl.h"
++#include "extensions.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(opencl);
+ 
+@@ -35,6 +36,13 @@ static cl_int filter_extensions( const char *unix_exts, SIZE_T size, char *win_e
+ 
+     ext = unix_exts;
+     win_size = 0;
++
++    for (int i=0; i<ARRAY_SIZE(known_extensions); i++) {
++        if (!strstr(ext, known_extensions[i].name)) {
++            win_size += strlen(known_extensions[i].name) + 1;
++        }
++    }
++
+     while (*ext)
+     {
+         const char *end = strchr( ext, ' ' );
+@@ -53,6 +61,17 @@ static cl_int filter_extensions( const char *unix_exts, SIZE_T size, char *win_e
+     if (size < win_size) return CL_INVALID_VALUE;
+ 
+     win_exts[0] = 0;
++
++    for (int i=0; i<ARRAY_SIZE(known_extensions); i++) {
++        size_t len;
++        if (!strstr(unix_exts, known_extensions[i].name)) {
++            len = strlen(known_extensions[i].name);
++            if (p != win_exts) *p++ = ' ';
++            memcpy(p, known_extensions[i].name, len);
++            p += len;
++        }
++    }
++
+     ext = unix_exts;
+     while (*ext)
+     {
+@@ -174,8 +193,17 @@ cl_int WINAPI clGetDeviceInfo( cl_device_id device, cl_device_info name,
+ 
+ void * WINAPI clGetExtensionFunctionAddress( const char *func_name )
+ {
++    int i;
+     void * ret = 0;
+     TRACE("(%s)\n",func_name);
++    for (i=0; i<ARRAY_SIZE(known_extensions); i++) {
++        if (known_extensions[i].get_function == NULL)
++            continue;
++        ret = known_extensions[i].get_function(func_name);
++        if (ret)
++            break;
++    }
++    return ret;
+ #if 0
+     ret = clGetExtensionFunctionAddress(func_name);
+ #else
+@@ -197,7 +225,7 @@ cl_int WINAPI clSetCommandQueueProperty( cl_command_queue command_queue, cl_comm
+ void * WINAPI clGetExtensionFunctionAddressForPlatform( cl_platform_id platform, const char *func_name )
+ {
+     FIXME( "(%p, %s) stub!\n", platform, debugstr_a(func_name) );
+-    return NULL;
++    return clGetExtensionFunctionAddress(func_name);
+ }
+ 
+ 
+-- 
+2.53.0
+
